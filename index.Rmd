@@ -1,0 +1,197 @@
+---
+title: "PracticalMachineLearningAssignment"
+author: "Symon Francis"
+date: "30 May 2016"
+output: html_document
+---
+
+###Background
+
+Human Activity Recognition (HAR) has emerged as a key research area in the last years and is gaining increasing attention by the pervasive computing research community especially for the development of context-aware systems. There are many potential applications for HAR, like: elderly monitoring, life log systems for monitoring energy expenditure and for supporting weight-loss programs, and digital assistants for weight lifting exercises.
+
+One of the HAR researches involves using devices such as Jawbone Up, Nike FuelBand, and Fitbit for collecting large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement - a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how much of a particular activity they do, but they rarely quantify how well they do it. 
+
+###Input Data
+
+The input data available for this study comprises measurements from accelerometers on the belt, forearm, arm, and dumbell of 6 participants who perform barbell lift activities correctly and incorrectly in 5 different ways categorized as 5 different activity clases. The definition of the classes are Class A - According to specification, Class B - throwing the elbows to the front, Class C - lifting the dumbbell only halfway, Class D - lowering the dumbbell only halfway and Class E - throwing the hips to the front. The data for this study come from the source: http://groupware.les.inf.puc-rio.br/har.
+
+The training data for this study are available at:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+The test data (validation data) are available at:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv
+
+###Objective
+The objective of this study is to use the available input data to build a near accurate relationship (model) between the accelerometer measurements and the class of activity which can then be used to predict the classes corresponding to a separate set of 20 accelerometer measurements considered as the validation data.
+
+###Methodology Overview
+The study methodology can be summarized in terms of the following steps:
+
+1. Downloading the training and test (validation) data from the specified website and loading them into two separate data frames
+
+2. Exploring and cleaning data in the two data frames by identifying and removing data fields (features) with missing values (NAs) and those that may not be useful for fitting models. Also carrying out data checks e.g. near zero covariates.
+
+3. Partioning the training data into two parts (modelTraining and modelTesting). Various models would be fitted on the Mytraining dataset and tested on the Mytesting dataset.
+
+4. Fitting various models on the Mytraining dataset and testing them on the Mytesting dataset. The models fitted are:
+    a. Linear Discriminant Analysis (lda) model
+    b. Trees model
+    c. Generalized Boosted model (gbm) with cross validation
+    d. Random Forest (rf) model
+    
+5. Selecting the most accurate model by comparing the Accuracy factor in the Confusion matrix. The model with the highest accuracy is expected to have the least Out of Sample error.
+
+6. Using the selected model to predict the class of activity for measurements in the validation data.
+
+```{r, echo=FALSE,warning=FALSE,message=FALSE}
+require(caret)
+require(rpart)
+require(rattle)
+require(randomForest)
+require(parallel)
+require(doParallel)
+```
+
+###Step 1: Downloading data and creating data frames
+The training and test (validation) data are downloaded from the specified website and loaded into two separate data frames i.e. 'training_Data' and 'validation_Data'. The 'validation_Data' will only be used to do prediction on the final selected model.
+
+```{r, results='hide'}
+data_url1<- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+data_url2<- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+
+if (!file.exists("pml-training.csv")) {download.file(data_url1, destfile = "pml-training.csv")}
+if (!file.exists("pml-testing.csv")) {download.file(data_url2, destfile = "pml-testing.csv")}
+
+# Import the data treating empty values as NA.
+training_Data <- read.csv("pml-training.csv", sep=",",header = TRUE, na.strings=c("NA",""))
+validation_Data <- read.csv("pml-testing.csv", sep=",",header = TRUE, na.strings=c("NA",""))
+```
+
+###Step 2: Exploring and Cleaning the data
+The observations made on exploring the two data frames are as follows:
+
+a. Both the training and validation data have 160 fields while the number of records are 19622 and 20 respectively.
+
+b. On comparison of the two data frames, column names are found to be identical for the first 159 fields. The last columns in the data frames are "classe" and "problem_id" respectively.
+
+c. There is missing data or NAs in 100 fields. These fields correspond to variance, standard deviation, skewness, kurtosis, maximum, minimum and average of measurements.
+
+d. The first 7 fields contain data including usernames and timestamps that will not be used to fit models.
+
+Based on the above observations, both the training and validation data are cleaned by removing the 107 fields stated above. However the fields  "classe" and "problem_id" are added back in to the data as they are required for model fitting and validation of the final model. Also the final selected data fields are checked and verified for absence of Near Zero Covariates.
+
+```{r, results='hide'}
+dim(training_Data);dim(validation_Data)
+cols_train <- colnames(training_Data)
+cols_validation <- colnames(validation_Data)
+
+# Verify column names (excluding classe and problem_id) are identical in the two data sets
+all.equal(cols_train[1:length(cols_train)-1], cols_validation[1:length(cols_validation)-1])
+
+#Identify fields with NA values
+hasMissing <- sapply(training_Data, function (x) any(is.na(x)))
+sum(hasMissing)
+
+#Identify useful fields with keywords
+selectedTrainCols <- !hasMissing & grepl("belt|[^(fore)]arm|dumbbell|forearm",names(hasMissing))
+selectedTrainCols <- names(hasMissing)[selectedTrainCols]
+selectedValidationCols <- selectedTrainCols
+
+#Add the two key fields
+selectedTrainCols[53]<-"classe"
+selectedValidationCols[53]<-"problem_id"
+
+#Extract the cleaned data fields
+training_Data_c<-training_Data[,selectedTrainCols]
+validation_Data_c<-validation_Data[,selectedValidationCols]
+
+#Check for near zero covariates
+nsv <- nearZeroVar(training_Data_c,saveMetrics=TRUE)
+```
+
+###Step 3: Partioning the training data into two parts
+While the validation data is kept away the training data is partitioned into two parts based on the "classe" variable applying a 60:40 ratio. The two new data frames are called 'modelTraining' and 'modelTesting'.
+
+```{r, results='hide'}
+set.seed(1234)
+inTrain <- createDataPartition(y=training_Data_c$classe, p=0.60, list=FALSE)
+modelTraining <- training_Data_c[inTrain, ]
+modelTesting <- training_Data_c[-inTrain, ]
+dim(modelTraining); dim(modelTesting)
+```
+
+###Step 4: Fitting various models
+The new data frames 'modelTraining' and 'modelTesting' are used to fit various models to arrive at a near accurate relationship between the accelerometer measurements and the class of activity which can then be used to predict the classes corresponding to a separate set of 20 accelerometer measurements available in the validation data.
+
+As demonstrated in the below sections, a number of models are fitted using the modelTraining data and its predictability is tested on the modelTesting data. The Confusion Matrix is generated for each model fit to evaluate the accuracy of the prediction.
+
+Cross Validation is used while fitting the Generalized Boosted model. Also parallel processing is used to improve performance.
+
+###Model fit using Linear Discriminant Analysis method
+
+```{r,warning=FALSE,message=FALSE}
+set.seed(12345)
+ModelLDA = train(classe ~ ., data=modelTraining,method="lda")
+ModelLDAPredict = predict(ModelLDA,modelTesting); 
+CMModelLDA <- confusionMatrix(ModelLDAPredict, modelTesting$classe)
+CMModelLDA
+```
+
+###Model fit using Trees method
+
+```{r,warning=FALSE,message=FALSE}
+set.seed(12345)
+ModelTree <- rpart(classe ~ ., data=modelTraining, method="class")
+fancyRpartPlot(ModelTree)
+ModelTreePredict <- predict(ModelTree, modelTesting, type = "class")
+CMModelTree <- confusionMatrix(ModelTreePredict, modelTesting$classe)
+CMModelTree
+```
+
+###Model fit using Generalized Boosted model with Cross Validation
+
+```{r,warning=FALSE,message=FALSE}
+set.seed(12345)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+fitControl <- trainControl(method = "repeatedcv",number = 5,repeats=1,allowParallel=TRUE)
+ModelBoost <- train(classe ~ ., data=modelTraining, method = "gbm",trControl = fitControl,verbose = FALSE)
+stopCluster(cluster)
+ModelBoostPredict <- predict(ModelBoost, newdata=modelTesting)
+CMModelBoost <- confusionMatrix(ModelBoostPredict, modelTesting$classe)
+CMModelBoost
+```
+
+###Model fit using Random Forests
+
+```{r,warning=FALSE,message=FALSE}
+set.seed(12345)
+ModelRForest <- randomForest(classe ~ ., data=modelTraining)
+ModelRForestPredict <- predict(ModelRForest, modelTesting, type = "class")
+CMModelRForest <- confusionMatrix(ModelRForestPredict, modelTesting$classe)
+CMModelRForest
+```
+
+###Step 5: Selecting the most accurate model
+The Accuracy factor in the Confusion Matrix generated for each model fit is a good measure to select the most accurate model. The model with the highest accuracy is expected to have the least Out of Sample error.
+
+The accuracy and corresponding Out of Sample error (OOS error) for the models fitted above are:
+
+    a. Linear Discriminant Analysis -> Accuracy = 0.702 ; OOS error = 0.298
+    b. Trees model -> Accuracy = 0.7392 ; OOS error = 0.2608
+    c. Generalized Boosted model with cross validation -> Accuracy = 0.9618 ; OOS error = 0.0382
+    d. Random Forest (rf) model -> Accuracy = 0.993 ; OOS error = 0.007
+ 
+The Random Forest method based model is the selected model as it has the highest accuracy of 0.993 and lowest Out of Sample error of 0.007 (<1%).
+
+###Step 6: Predicting Results on the Validation Data
+The Random Forest method based model is used to predict the class of activity ("classe" variable) for the 20 sets of measurements in the validation data set.
+```{r,warning=FALSE}
+ModelBestPredict <- predict(ModelRForest, validation_Data_c, type = "class")
+ModelBestPredict
+```
+
+###Conclusion
+The predicted results for the validation set of 20 accelerator measurements are found to be matching 100% with the expected results.
+
+                                _______________________
